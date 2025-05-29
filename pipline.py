@@ -1,559 +1,609 @@
+"""
+Core pipeline module for pose estimation, angle calculation, and pose classification.
+
+This module provides three main classes:
+- PoseEstimator: Handles MediaPipe setup, landmark detection from images, 
+                 and extraction of landmarks for pose, face, and hands.
+- AngleCalculator: A utility class with static methods to calculate angles 
+                   between three points and distances between two points.
+- PoseClassifier: Classifies human poses (e.g., T-Pose, Warrior II, Tree Pose) 
+                  based on calculated angles from landmarks. It also manages 
+                  angle states over time for gesture recognition.
+"""
 import math
 import cv2
 import numpy as np
 import mediapipe as mp
 import matplotlib.pyplot as plt
 import time
-from icecream import ic 
+from icecream import ic # For debugging, can be removed in production
 
 
-# Time
-time_ = 0
+class PoseEstimator:
+    """
+    Estimates pose, face, and hand landmarks from an image.
+    """
+    def __init__(self, static_image_mode=True, min_detection_confidence=0.3, min_tracking_confidence=0.5, model_complexity=2):
+        """
+        Initializes MediaPipe objects.
+        Args:
+            static_image_mode: Whether to treat the input images as a batch of static
+                               and possibly unrelated images, or a video stream.
+            min_detection_confidence: Minimum confidence value ([0.0, 1.0]) for the
+                                      detection to be considered successful.
+            min_tracking_confidence: Minimum confidence value ([0.0, 1.0]) for the
+                                       person tracking to be considered successful.
+            model_complexity: Complexity of the pose landmark model: 0, 1 or 2.
+        """
+        self.mp_pose = mp.solutions.holistic
+        self.mp_drawing = mp.solutions.drawing_utils
+        self.mp_drawing_styles = mp.solutions.drawing_styles
+        self.pose = self.mp_pose.Holistic(static_image_mode=static_image_mode,
+                                           min_detection_confidence=min_detection_confidence,
+                                           min_tracking_confidence=min_tracking_confidence,
+                                           model_complexity=model_complexity)
 
-# Initializing mediapipe pose class.
-# mp_pose = mp.solutions.pose
-mp_pose = mp.solutions.holistic
+    def extract_keypoints(self, results):
+        """
+        Extracts keypoints for pose, face, and hands from MediaPipe results.
+        Args:
+            results: MediaPipe Holistic output.
+        Returns:
+            A numpy array concatenating pose, face, left hand, and right hand landmarks.
+        """
+        pose = np.array([[res.x, res.y, res.z, res.visibility] for res in results.pose_landmarks.landmark]).flatten() if results.pose_landmarks else np.zeros(33*4) # 33 landmarks * 4 values (x,y,z,visibility)
+        face = np.array([[res.x, res.y, res.z] for res in results.face_landmarks.landmark]).flatten() if results.face_landmarks else np.zeros(468*3) # 468 landmarks * 3 values (x,y,z)
+        left_hand = np.array([[res.x, res.y, res.z] for res in results.left_hand_landmarks.landmark]).flatten() if results.left_hand_landmarks else np.zeros(21*3) # 21 landmarks * 3 values (x,y,z)
+        right_hand = np.array([[res.x, res.y, res.z] for res in results.right_hand_landmarks.landmark]).flatten() if results.right_hand_landmarks else np.zeros(21*3) # 21 landmarks * 3 values (x,y,z)
+        return np.concatenate([pose, face, left_hand, right_hand])
 
-mp_drawing_styles = mp.solutions.drawing_styles
-# mp_holistic = mp.solutions.holistic
-
-# Setting up the Pose function.
-# pose = mp_pose.Pose(static_image_mode=True, min_detection_confidence=0.3, model_complexity=2)
-
-# Initializing mediapipe drawing class, useful for annotation.
-mp_drawing = mp.solutions.drawing_utils 
-
-def extract_keypoints(results):
-    pose = np.array([[res.x, res.y, res.z, res.visibility] for res in results.pose_landmarks.landmark]).flatten() if results.pose_landmarks else np.zeros(132)
-    face = np.array([[res.x, res.y, res.z] for res in results.face_landmarks.landmark]).flatten() if results.face_landmarks else np.zeros(1404)
-    left_hand = np.array([[res.x, res.y, res.z] for res in results.left_hand_landmarks.landmark]).flatten() if results.left_hand_landmarks else np.zeros(63)
-    right_hand = np.array([[res.x, res.y, res.z] for res in results.right_hand_landmarks.landmark]).flatten() if results.right_hand_landmarks else np.zeros(63)
-    return np.concatenate([pose, face, left_hand, right_hand])
-
-def extract_keypoints_Pose(results):
+    def extract_pose_keypoints(self, results):
+        """
+        Extracts only pose keypoints from MediaPipe results.
+        Args:
+            results: MediaPipe Holistic output.
+        Returns:
+            A numpy array of pose landmarks.
+        """
         pose = np.array([[res.x, res.y, res.z, res.visibility] for res in results.pose_landmarks.landmark]).flatten() if results.pose_landmarks else np.zeros(33*4)
         return np.concatenate([pose])
-    
-def extract_keypoints_Pose_(results):
-        pose = []
-        for i in range(len(results.pose_landmarks.landmark)):
-            sample = [results.pose_landmarks.landmark[i].x, results.pose_landmarks.landmark[i].y]
-            pose.append(sample)
-        pose = np.array(pose)
-        pose = pose.reshape((1,*pose.shape))
-        return pose
+    # Removed extract_pose_keypoints_alternative_format as it's unused by the classification pipeline.
 
-def detectPose(image, pose, display=True):
-    '''
-    This function performs pose detection on an image.
-    Args:
-        image: The input image with a prominent person whose pose landmarks needs to be detected.
-        pose: The pose setup function required to perform the pose detection.
-        display: A boolean value that is if set to true the function displays the original input image, the resultant image, 
-                 and the pose landmarks in 3D plot and returns nothing.
-    Returns:
-        output_image: The input image with the detected pose landmarks drawn.
-        landmarks: A list of detected landmarks converted into their original scale.
-    '''
-    
-    # Create a copy of the input image.
-    output_image = image.copy()
-    
-    # Convert the image from BGR into RGB format.
-    imageRGB = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    
-    # Perform the Pose Detection.
-    results = pose.process(imageRGB)
-    
-    # Retrieve the height and width of the input image.
-    height, width, _ = image.shape
-    
-    # Initialize a list to store the detected landmarks.
-    landmarks = []
-    
-    # keypoint = extract_keypoints_Pose_(results)
-    # print(keypoint.shape)
-    
-    print(len(results.pose_landmarks.landmark))
-    
-    # Check if any landmarks are detected.
-    if results.pose_landmarks:
-    
-        # Draw Pose landmarks on the output image.
-        mp_drawing.draw_landmarks(image=output_image, landmark_list=results.pose_landmarks,connections=mp_pose.POSE_CONNECTIONS,landmark_drawing_spec=mp_drawing_styles.get_default_pose_landmarks_style())
-        mp_drawing.draw_landmarks(image=output_image,landmark_list=results.left_hand_landmarks,connections=mp_pose.HAND_CONNECTIONS,landmark_drawing_spec=mp_drawing_styles.get_default_hand_landmarks_style())
-        mp_drawing.draw_landmarks(image=output_image, landmark_list=results.right_hand_landmarks, connections=mp_pose.HAND_CONNECTIONS,landmark_drawing_spec=mp_drawing_styles.get_default_hand_landmarks_style())
+    def detectPose(self, image, display=True):
+        '''
+        Performs pose detection on an image and extracts landmarks.
+        Args:
+            image: The input image.
+            display: If True, displays the original and output images with landmarks.
+        Returns:
+            output_image: The image with landmarks drawn.
+            detected_landmarks: A dictionary containing lists of landmarks for
+                                'pose', 'left_hand', and 'right_hand'.
+                                Landmarks are tuples (x, y, z) scaled to image dimensions.
+                                Returns None for a category if no landmarks are detected.
+        '''
+        output_image = image.copy()
+        imageRGB = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        results = self.pose.process(imageRGB)
+
+        height, width, _ = image.shape
         
-        # mp_drawing.draw_landmarks(image=output_image, landmark_list=results.face_landmarks,connections=mp_pose.FACEMESH_CONTOURS,landmark_drawing_spec=None,connection_drawing_spec=mp_drawing_styles.get_default_face_mesh_contours_style())
-        mp_drawing.draw_landmarks(image=output_image, landmark_list=results.face_landmarks,connections=mp_pose.FACEMESH_TESSELATION,landmark_drawing_spec=None,connection_drawing_spec=mp_drawing_styles.get_default_face_mesh_tesselation_style())
-        
-        # Iterate over the detected landmarks.
-        for landmark in results.pose_landmarks.landmark:
-            # Append the landmark into the list.
-            landmarks.append((int(landmark.x * width), int(landmark.y * height),
-                                  (landmark.z * width)))
-            
-        # Append the landmark LEFT Hand into the list. 
-        if results.right_hand_landmarks:
-            for landmark in results.right_hand_landmarks.landmark:
-                # Append the landmark into the list.
-                landmarks.append((int(landmark.x * width), int(landmark.y * height),
-                                    (landmark.z * width)))
-        else:
-             for i in range(21):
-                # Append the landmark into the list.
-                landmarks.append((int(0* width), int(0 * height),
-                                    (0 * width)))
-        
-        # Append the landmark RIGHT Hand into the list. 
+        detected_landmarks = {
+            'pose': None, 
+            'left_hand': None, 
+            'right_hand': None
+        }
+
+        # Process and draw pose landmarks
+        if results.pose_landmarks:
+            detected_landmarks['pose'] = []
+            for landmark in results.pose_landmarks.landmark:
+                detected_landmarks['pose'].append(
+                    (int(landmark.x * width), int(landmark.y * height), int(landmark.z * width))
+                )
+            self.mp_drawing.draw_landmarks(
+                image=output_image,
+                landmark_list=results.pose_landmarks,
+                connections=self.mp_pose.POSE_CONNECTIONS,
+                landmark_drawing_spec=self.mp_drawing_styles.get_default_pose_landmarks_style()
+            )
+
+        # Process and draw left hand landmarks
         if results.left_hand_landmarks:
+            detected_landmarks['left_hand'] = []
             for landmark in results.left_hand_landmarks.landmark:
-                # Append the landmark into the list.
-                landmarks.append((int(landmark.x * width), int(landmark.y * height),
-                                    (landmark.z * width)))
-            # print(len(results.left_hand_landmarks.landmark))
+                detected_landmarks['left_hand'].append(
+                    (int(landmark.x * width), int(landmark.y * height), int(landmark.z * width))
+                )
+            self.mp_drawing.draw_landmarks(
+                image=output_image,
+                landmark_list=results.left_hand_landmarks,
+                connections=self.mp_pose.HAND_CONNECTIONS,
+                landmark_drawing_spec=self.mp_drawing_styles.get_default_hand_landmarks_style()
+            )
+
+        # Process and draw right hand landmarks
+        if results.right_hand_landmarks:
+            detected_landmarks['right_hand'] = []
+            for landmark in results.right_hand_landmarks.landmark:
+                detected_landmarks['right_hand'].append(
+                    (int(landmark.x * width), int(landmark.y * height), int(landmark.z * width))
+                )
+            self.mp_drawing.draw_landmarks(
+                image=output_image,
+                landmark_list=results.right_hand_landmarks,
+                connections=self.mp_pose.HAND_CONNECTIONS,
+                landmark_drawing_spec=self.mp_drawing_styles.get_default_hand_landmarks_style()
+            )
+        
+        # Draw face landmarks (tesselation and contours)
+        # These are not returned in detected_landmarks but drawn if present
+        if results.face_landmarks:
+            # self.mp_drawing.draw_landmarks(image=output_image, landmark_list=results.face_landmarks,connections=self.mp_pose.FACEMESH_CONTOURS,landmark_drawing_spec=None,connection_drawing_spec=self.mp_drawing_styles.get_default_face_mesh_contours_style())
+            self.mp_drawing.draw_landmarks(image=output_image, landmark_list=results.face_landmarks,connections=self.mp_pose.FACEMESH_TESSELATION,landmark_drawing_spec=None,connection_drawing_spec=self.mp_drawing_styles.get_default_face_mesh_tesselation_style())
+
+        if display:
+            plt.figure(figsize=[22,22])
+            plt.subplot(121); plt.imshow(image[:,:,::-1]); plt.title("Original Image"); plt.axis('off');
+            plt.subplot(122); plt.imshow(output_image[:,:,::-1]); plt.title("Output Image"); plt.axis('off');
+            if results.pose_world_landmarks: # Plot 3D world landmarks if available
+                self.mp_drawing.plot_landmarks(results.pose_world_landmarks, self.mp_pose.POSE_CONNECTIONS)
+            plt.show()
+        
+        return output_image, detected_landmarks
+
+class AngleCalculator:
+    """
+    Utility class for calculating angles and distances between landmarks.
+    """
+    @staticmethod
+    def calculateAngle(landmark1, landmark2, landmark3):
+        '''
+        This function calculates angle between three different landmarks.
+        Args:
+            landmark1: The first landmark containing the x,y and z coordinates.
+            landmark2: The second landmark containing the x,y and z coordinates.
+            landmark3: The third landmark containing the x,y and z coordinates.
+        Returns:
+            angle: The calculated angle between the three landmarks.
+        '''
+        # Get the required landmarks coordinates.
+        x1, y1, _ = landmark1
+        x2, y2, _ = landmark2
+        x3, y3, _ = landmark3
+
+        # Calculate the angle between the three points
+        angle = math.degrees(math.atan2(y3 - y2, x3 - x2) - math.atan2(y1 - y2, x1 - x2))
+        
+        # Check if the angle is less than zero.
+        if angle < 0:
+            # Add 360 to the found angle.
+            angle += 360
+        # Return the calculated angle. This line is correctly indented to be
+        # part of the calculateAngle method and at the same level as the 'if' statement.
+        return angle
+
+    @staticmethod
+    def calculateDistance(landmark1, landmark2):
+        x1, y1, _ = landmark1
+        x2, y2, _ = landmark2
+
+        # Calculate the Distance between the two points
+        dis = math.sqrt( ((x2 - x1)**2)+((y2 - y1))**2)
+
+        
+        # Return the calculated Distance.
+        return dis
+
+
+class PoseClassifier:
+    """
+    Classifies poses based on landmark angles and manages angle states.
+    """
+    # --- Constants for Pose Classification Logic ---
+    # Angle thresholds for T-Pose and Warrior II
+    STRAIGHT_ARM_ELBOW_MIN = 165
+    STRAIGHT_ARM_ELBOW_MAX = 195
+    TPOSE_SHOULDER_MIN = 80
+    TPOSE_SHOULDER_MAX = 110
+    TPOSE_STRAIGHT_LEG_MIN = 160 # Knee angle for T-Pose
+    TPOSE_STRAIGHT_LEG_MAX = 195
+
+    WARRIOR_II_STRAIGHT_LEG_MIN = 165
+    WARRIOR_II_STRAIGHT_LEG_MAX = 195
+    WARRIOR_II_BENT_LEG_MIN = 90
+    WARRIOR_II_BENT_LEG_MAX = 120
+
+    # Angle thresholds for Tree Pose
+    TREE_POSE_STRAIGHT_LEG_MIN = 165
+    TREE_POSE_STRAIGHT_LEG_MAX = 195
+    TREE_POSE_BENT_LEG_MIN_RIGHT_LEG_UP = 25 # Right leg bent, foot at left thigh
+    TREE_POSE_BENT_LEG_MAX_RIGHT_LEG_UP = 45
+    TREE_POSE_BENT_LEG_MIN_LEFT_LEG_UP = 315 # Left leg bent, foot at right thigh (angle > 180)
+    TREE_POSE_BENT_LEG_MAX_LEFT_LEG_UP = 335
+    
+    # Angle diff threshold for "bye" gesture (example)
+    BYE_GESTURE_ELBOW_DIFF_THRESHOLD = 10
+    BYE_GESTURE_RIGHT_ELBOW_MIN = 25
+    BYE_GESTURE_RIGHT_ELBOW_MAX = 110
+    BYE_GESTURE_LEFT_ELBOW_MIN = 260
+    BYE_GESTURE_LEFT_ELBOW_MAX = 340
+
+
+    # --- Constants for Drawing Logic ---
+    # Colors (BGR format)
+    COLOR_RED = (0, 0, 255)
+    COLOR_GREEN = (0, 255, 0)
+    COLOR_WHITE = (255, 255, 255)
+    COLOR_BLUE_TEXT = (255, 0, 0) # For distance text
+    
+    # Font properties
+    FONT = cv2.FONT_HERSHEY_PLAIN
+    FONT_SCALE_ANGLES = 1.3
+    FONT_SCALE_DISTANCES = 1.3
+    FONT_THICKNESS = 2
+
+    # Text positioning for angles
+    TEXT_POS_X_ANGLES = 10
+    TEXT_POS_Y_ANGLES_START = 20
+    TEXT_STEP_Y_ANGLES = 40
+
+    # Text positioning for distances
+    TEXT_POS_X_DISTANCES = 500 # Adjusted from 10*50
+    TEXT_POS_Y_DISTANCES_START = 20
+    TEXT_STEP_Y_DISTANCES = 40
+    
+    # Label text
+    LABEL_POS_X = 10
+    LABEL_POS_Y = 30
+    LABEL_FONT_SCALE = 2
+    UNKNOWN_POSE_LABEL = 'Unknown Pose'
+
+
+    def __init__(self):
+        self.time_ = time.time() # Initialize time for diff calculation
+        self.Angle_previous = [] # Stores history of angle sets for diff calculation (can be removed if not further used)
+        self.Angle_diff = []     # Stores calculated differences (can be removed if not further used)
+
+        # Current angles - initialized to 0
+        self.left_elbow_angle = self.right_elbow_angle = 0
+        self.left_shoulder_angle = self.right_shoulder_angle = 0
+        self.left_wrist_angle = self.right_wrist_angle = 0
+        self.left_index_mcp_angle = self.right_index_mcp_angle = 0
+        self.left_pinky_tip_angle = self.right_pinky_tip_angle = 0
+        self.left_knee_angle = self.right_knee_angle = 0
+
+        # Previous angles - initialized to 0
+        self.left_elbow_angle_previous = self.right_elbow_angle_previous = 0
+        self.left_shoulder_angle_previous = self.right_shoulder_angle_previous = 0
+        self.left_wrist_angle_previous = self.right_wrist_angle_previous = 0
+        self.left_index_mcp_angle_previous = self.right_index_mcp_angle_previous = 0
+        self.left_pinky_tip_angle_previous = self.right_pinky_tip_angle_previous = 0
+
+        # Angle differences - initialized to 0
+        self.left_elbow_angle_diff = self.right_elbow_angle_diff = 0
+        self.left_shoulder_angle_diff = self.right_shoulder_angle_diff = 0
+        self.left_wrist_angle_diff = self.right_wrist_angle_diff = 0
+        self.left_index_mcp_angle_diff = self.right_index_mcp_angle_diff = 0
+        self.left_pinky_tip_angle_diff = self.right_pinky_tip_angle_diff = 0
+        
+        self.mp_pose = mp.solutions.holistic # For accessing PoseLandmark and HandLandmark enums
+
+    def _update_angle_history_and_diffs(self):
+        """
+        Updates the history of angles and calculates differences.
+        This internal method is called periodically.
+        """
+        if (time.time() - self.time_ > 0.2):
+            self.left_elbow_angle_diff = abs(self.left_elbow_angle - self.left_elbow_angle_previous)
+            self.right_elbow_angle_diff = abs(self.right_elbow_angle - self.right_elbow_angle_previous)
+            self.left_shoulder_angle_diff = abs(self.left_shoulder_angle - self.left_shoulder_angle_previous)
+            self.right_shoulder_angle_diff = abs(self.right_shoulder_angle - self.right_shoulder_angle_previous)
+            self.left_wrist_angle_diff = abs(self.left_wrist_angle - self.left_wrist_angle_previous)
+            self.right_wrist_angle_diff = abs(self.right_wrist_angle - self.right_wrist_angle_previous)
+            self.left_index_mcp_angle_diff = abs(self.left_index_mcp_angle - self.left_index_mcp_angle_previous)
+            self.right_index_mcp_angle_diff = abs(self.right_index_mcp_angle - self.right_index_mcp_angle_previous)
+            self.left_pinky_tip_angle_diff = abs(self.left_pinky_tip_angle - self.left_pinky_tip_angle_previous)
+            self.right_pinky_tip_angle_diff = abs(self.right_pinky_tip_angle - self.right_pinky_tip_angle_previous)
+
+            self.Angle_diff.append([
+                self.left_elbow_angle_diff, self.right_elbow_angle_diff,
+                self.left_shoulder_angle_diff, self.right_shoulder_angle_diff,
+                self.left_wrist_angle_diff, self.right_wrist_angle_diff,
+                self.left_index_mcp_angle_diff, self.right_index_mcp_angle_diff,
+                self.left_pinky_tip_angle_diff, self.right_pinky_tip_angle_diff
+            ])
+            # ic(self.Angle_diff) # Commented out for now, useful for debugging angle diffs.
+
+            # Update previous angles
+            self.left_elbow_angle_previous = self.left_elbow_angle
+            self.right_elbow_angle_previous = self.right_elbow_angle
+            self.left_shoulder_angle_previous = self.left_shoulder_angle
+            self.right_shoulder_angle_previous = self.right_shoulder_angle
+            self.left_wrist_angle_previous = self.left_wrist_angle
+            self.right_wrist_angle_previous = self.right_wrist_angle
+            self.left_index_mcp_angle_previous = self.left_index_mcp_angle
+            self.right_index_mcp_angle_previous = self.right_index_mcp_angle
+            self.left_pinky_tip_angle_previous = self.left_pinky_tip_angle
+            self.right_pinky_tip_angle_previous = self.right_pinky_tip_angle
+            
+            self.Angle_previous = [] # Reset, as previous values are now stored in instance vars
+            self.Angle_diff = [] # Reset diff list for next interval
+            self.time_ = time.time()
+
+
+    def classifyPose(self, landmarks_dict, output_image, display=False): # Renamed 'landmarks' to 'landmarks_dict'
+
+        '''
+        This function classifies yoga poses depending upon the angles of various body joints.
+        Args:
+            landmarks: A list of detected landmarks of the person whose pose needs to be classified.
+            output_image: A image of the person with the detected pose landmarks drawn.
+            display: A boolean value that is if set to true the function displays the resultant image with the pose label 
+            written on it and returns nothing.
+        Returns:
+            output_image: The image with the detected pose landmarks drawn and pose label written.
+            label: The classified pose label of the person in the output_image.
+        '''
+        # landmarks_dict contains 'pose', 'left_hand', 'right_hand'
+        pose_landmarks = landmarks_dict.get('pose')
+        left_hand_landmarks = landmarks_dict.get('left_hand')
+        right_hand_landmarks = landmarks_dict.get('right_hand')
+
+        label = self.UNKNOWN_POSE_LABEL
+        current_color = self.COLOR_RED # Default color for unknown pose
+        
+        # --- Calculate Body Angles (if pose landmarks are available) ---
+        if pose_landmarks:
+            self.right_elbow_angle = AngleCalculator.calculateAngle(
+                pose_landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER.value],
+                pose_landmarks[self.mp_pose.PoseLandmark.LEFT_ELBOW.value],
+                pose_landmarks[self.mp_pose.PoseLandmark.LEFT_WRIST.value])
+            
+            self.left_elbow_angle = AngleCalculator.calculateAngle(
+                pose_landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER.value],
+                pose_landmarks[self.mp_pose.PoseLandmark.RIGHT_ELBOW.value],
+                pose_landmarks[self.mp_pose.PoseLandmark.RIGHT_WRIST.value])   
+            
+            self.right_shoulder_angle = AngleCalculator.calculateAngle(
+                pose_landmarks[self.mp_pose.PoseLandmark.LEFT_ELBOW.value],
+                pose_landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER.value],
+                pose_landmarks[self.mp_pose.PoseLandmark.LEFT_HIP.value])
+
+            self.left_shoulder_angle = AngleCalculator.calculateAngle(
+                pose_landmarks[self.mp_pose.PoseLandmark.RIGHT_HIP.value],
+                pose_landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER.value],
+                pose_landmarks[self.mp_pose.PoseLandmark.RIGHT_ELBOW.value])
+
+            self.right_knee_angle = AngleCalculator.calculateAngle(
+                pose_landmarks[self.mp_pose.PoseLandmark.LEFT_HIP.value],
+                pose_landmarks[self.mp_pose.PoseLandmark.LEFT_KNEE.value],
+                pose_landmarks[self.mp_pose.PoseLandmark.LEFT_ANKLE.value])
+
+            self.left_knee_angle = AngleCalculator.calculateAngle(
+                pose_landmarks[self.mp_pose.PoseLandmark.RIGHT_HIP.value],
+                pose_landmarks[self.mp_pose.PoseLandmark.RIGHT_KNEE.value],
+                pose_landmarks[self.mp_pose.PoseLandmark.RIGHT_ANKLE.value])
+        else: # Reset body angles if no pose landmarks
+            self.right_elbow_angle = self.left_elbow_angle = 0
+            self.right_shoulder_angle = self.left_shoulder_angle = 0
+            self.right_knee_angle = self.left_knee_angle = 0
+
+        # --- Calculate Hand Angles (if hand landmarks are available) ---
+        # Note: Original code had left/right hand angle calculations swapped. Corrected here.
+        # For self.left_wrist_angle, we use right_hand_landmarks because it's the person's left hand from their perspective.
+        if right_hand_landmarks: # Person's LEFT hand
+            self.left_wrist_angle = AngleCalculator.calculateAngle(
+                right_hand_landmarks[self.mp_pose.HandLandmark.THUMB_TIP.value],
+                right_hand_landmarks[self.mp_pose.HandLandmark.WRIST.value],
+                right_hand_landmarks[self.mp_pose.HandLandmark.PINKY_TIP.value])
+
+            self.left_index_mcp_angle = AngleCalculator.calculateAngle(
+                right_hand_landmarks[self.mp_pose.HandLandmark.WRIST.value],
+                right_hand_landmarks[self.mp_pose.HandLandmark.INDEX_FINGER_MCP.value],
+                right_hand_landmarks[self.mp_pose.HandLandmark.INDEX_FINGER_TIP.value])
+            
+            self.left_pinky_tip_angle = AngleCalculator.calculateAngle(
+                right_hand_landmarks[self.mp_pose.HandLandmark.WRIST.value],
+                right_hand_landmarks[self.mp_pose.HandLandmark.PINKY_MCP.value],
+                right_hand_landmarks[self.mp_pose.HandLandmark.PINKY_TIP.value])
+        else: # Reset left hand angles
+            self.left_wrist_angle = self.left_index_mcp_angle = self.left_pinky_tip_angle = 0
+
+        if left_hand_landmarks: # Person's RIGHT hand
+            self.right_wrist_angle = AngleCalculator.calculateAngle(
+                left_hand_landmarks[self.mp_pose.HandLandmark.THUMB_TIP.value],
+                left_hand_landmarks[self.mp_pose.HandLandmark.WRIST.value],
+                left_hand_landmarks[self.mp_pose.HandLandmark.PINKY_TIP.value])
+
+            self.right_index_mcp_angle = AngleCalculator.calculateAngle(
+                left_hand_landmarks[self.mp_pose.HandLandmark.WRIST.value],
+                left_hand_landmarks[self.mp_pose.HandLandmark.INDEX_FINGER_MCP.value],
+                left_hand_landmarks[self.mp_pose.HandLandmark.INDEX_FINGER_TIP.value])
+
+            self.right_pinky_tip_angle = AngleCalculator.calculateAngle(
+                left_hand_landmarks[self.mp_pose.HandLandmark.WRIST.value],
+                left_hand_landmarks[self.mp_pose.HandLandmark.PINKY_MCP.value],
+                left_hand_landmarks[self.mp_pose.HandLandmark.PINKY_TIP.value])
+        else: # Reset right hand angles
+            self.right_wrist_angle = self.right_index_mcp_angle = self.right_pinky_tip_angle = 0
+            
+        # --- Calculate Hand Distances (if hand landmarks are available) ---
+        left_thumb_index_distance = right_thumb_index_distance = 0
+        left_thumb_pinky_distance = right_thumb_pinky_distance = 0
+        left_wrist_index_distance = right_wrist_index_distance = 0
+        left_wrist_pinky_distance = right_wrist_pinky_distance = 0
+
+        if right_hand_landmarks: # Person's LEFT hand distances
+            left_thumb_index_distance = AngleCalculator.calculateDistance(
+                right_hand_landmarks[self.mp_pose.HandLandmark.THUMB_TIP.value],
+                right_hand_landmarks[self.mp_pose.HandLandmark.INDEX_FINGER_TIP.value])
+            left_thumb_pinky_distance = AngleCalculator.calculateDistance(
+                right_hand_landmarks[self.mp_pose.HandLandmark.THUMB_TIP.value],
+                right_hand_landmarks[self.mp_pose.HandLandmark.PINKY_TIP.value])
+            left_wrist_index_distance = AngleCalculator.calculateDistance(
+                right_hand_landmarks[self.mp_pose.HandLandmark.WRIST.value],
+                right_hand_landmarks[self.mp_pose.HandLandmark.INDEX_FINGER_TIP.value])
+            left_wrist_pinky_distance = AngleCalculator.calculateDistance(
+                right_hand_landmarks[self.mp_pose.HandLandmark.WRIST.value],
+                right_hand_landmarks[self.mp_pose.HandLandmark.PINKY_TIP.value])
+
+        if left_hand_landmarks: # Person's RIGHT hand distances
+            right_thumb_index_distance = AngleCalculator.calculateDistance(
+                left_hand_landmarks[self.mp_pose.HandLandmark.THUMB_TIP.value],
+                left_hand_landmarks[self.mp_pose.HandLandmark.INDEX_FINGER_TIP.value])
+            right_thumb_pinky_distance = AngleCalculator.calculateDistance(
+                left_hand_landmarks[self.mp_pose.HandLandmark.THUMB_TIP.value],
+                left_hand_landmarks[self.mp_pose.HandLandmark.PINKY_TIP.value])
+            right_wrist_index_distance = AngleCalculator.calculateDistance(
+                left_hand_landmarks[self.mp_pose.HandLandmark.WRIST.value],
+                left_hand_landmarks[self.mp_pose.HandLandmark.INDEX_FINGER_TIP.value])
+            right_wrist_pinky_distance = AngleCalculator.calculateDistance(
+                left_hand_landmarks[self.mp_pose.HandLandmark.WRIST.value],
+                left_hand_landmarks[self.mp_pose.HandLandmark.PINKY_TIP.value])
+
+        # (Commented out circle drawing for brevity, can be re-added if needed)
+        # if right_hand_landmarks:
+        #     cirlcr1_posx ,cirlcr1_posy,_= right_hand_landmarks[self.mp_pose.HandLandmark.THUMB_TIP.value]
+        #     cirlcr2_posx ,cirlcr2_posy,_= right_hand_landmarks[self.mp_pose.HandLandmark.INDEX_FINGER_TIP.value]
+        # if left_hand_landmarks:
+        #     cirlcr1_posx ,cirlcr1_posy,_= left_hand_landmarks[self.mp_pose.HandLandmark.THUMB_TIP.value]
+        #     cirlcr2_posx ,cirlcr2_posy,_= left_hand_landmarks[self.mp_pose.HandLandmark.INDEX_FINGER_TIP.value]
+        self._draw_angle_and_distance_data(output_image, 
+                                           left_thumb_index_distance, right_thumb_index_distance,
+                                           left_thumb_pinky_distance, right_thumb_pinky_distance,
+                                           left_wrist_index_distance, right_wrist_index_distance,
+                                           left_wrist_pinky_distance, right_wrist_pinky_distance)
+        
+        self._update_angle_history_and_diffs() # Update historical data for next frame
+        
+        # --- Pose Classification Logic ---
+        # Check for specific poses. Order might matter if poses have overlapping criteria.
+        label = self._check_t_pose_and_warrior_ii()
+        if label == self.UNKNOWN_POSE_LABEL: # Only check for Tree Pose if not already classified
+            label = self._check_tree_pose()
+        
+        # Example "Bye" gesture detection (can be expanded or moved)
+        self._check_bye_gesture() # This currently prints debug messages, doesn't set label
+
+        if label != self.UNKNOWN_POSE_LABEL:
+            current_color = self.COLOR_GREEN
+        
+        cv2.putText(output_image, label, (self.LABEL_POS_X, self.LABEL_POS_Y), 
+                    self.FONT, self.LABEL_FONT_SCALE, current_color, self.FONT_THICKNESS)
+        
+        if display:
+            plt.figure(figsize=[10,10])
+            plt.title("Output Image"); plt.axis('off'); plt.imshow(output_image[:,:,::-1]); plt.show()
         else:
-             for i in range(21):
-                # Append the landmark into the list.
-                landmarks.append((int(0* width), int(0 * height),
-                                    (0 * width)))
-        
-        # print(len(landmarks))
-    
-    # Check if the original input image and the resultant image are specified to be displayed.
-    if display:
-    
-        # Display the original input image and the resultant image.
-        plt.figure(figsize=[22,22])
-        plt.subplot(121);plt.imshow(image[:,:,::-1]);plt.title("Original Image");plt.axis('off');
-        plt.subplot(122);plt.imshow(output_image[:,:,::-1]);plt.title("Output Image");plt.axis('off');
-        
-        # Also Plot the Pose landmarks in 3D.
-        mp_drawing.plot_landmarks(results.pose_world_landmarks, mp_pose.POSE_CONNECTIONS)
-        
-    # Otherwise
-    else:
-        
-        # Return the output image and the found landmarks.
-        return output_image, landmarks
-    
-def calculateAngle(landmark1, landmark2, landmark3):
-    '''
-    This function calculates angle between three different landmarks.
-    Args:
-        landmark1: The first landmark containing the x,y and z coordinates.
-        landmark2: The second landmark containing the x,y and z coordinates.
-        landmark3: The third landmark containing the x,y and z coordinates.
-    Returns:
-        angle: The calculated angle between the three landmarks.
+            return output_image, label
 
-    '''
+    def _check_t_pose_and_warrior_ii(self):
+        """
+        Checks for T-Pose and Warrior II pose.
+        These are grouped as they share initial arm and shoulder conditions.
+        Returns:
+            str: The pose label ('T Pose', 'Warrior II Pose') or UNKNOWN_POSE_LABEL.
+        """
+        label = self.UNKNOWN_POSE_LABEL
+        # Check if both arms are straight and shoulders are at T-pose angles
+        if (self.STRAIGHT_ARM_ELBOW_MIN < self.left_elbow_angle < self.STRAIGHT_ARM_ELBOW_MAX and
+            self.STRAIGHT_ARM_ELBOW_MIN < self.right_elbow_angle < self.STRAIGHT_ARM_ELBOW_MAX):
+            if (self.TPOSE_SHOULDER_MIN < self.left_shoulder_angle < self.TPOSE_SHOULDER_MAX and
+                self.TPOSE_SHOULDER_MIN < self.right_shoulder_angle < self.TPOSE_SHOULDER_MAX):
 
-    # Get the required landmarks coordinates.
-    x1, y1, _ = landmark1
-    x2, y2, _ = landmark2
-    x3, y3, _ = landmark3
+                # Check for Warrior II: one leg straight, one leg bent at specific angles
+                is_left_leg_straight_for_warrior = self.WARRIOR_II_STRAIGHT_LEG_MIN < self.left_knee_angle < self.WARRIOR_II_STRAIGHT_LEG_MAX
+                is_right_leg_straight_for_warrior = self.WARRIOR_II_STRAIGHT_LEG_MIN < self.right_knee_angle < self.WARRIOR_II_STRAIGHT_LEG_MAX
+                is_left_leg_bent_for_warrior = self.WARRIOR_II_BENT_LEG_MIN < self.left_knee_angle < self.WARRIOR_II_BENT_LEG_MAX
+                is_right_leg_bent_for_warrior = self.WARRIOR_II_BENT_LEG_MIN < self.right_knee_angle < self.WARRIOR_II_BENT_LEG_MAX
 
-    # Calculate the angle between the three points
-    angle = math.degrees(math.atan2(y3 - y2, x3 - x2) - math.atan2(y1 - y2, x1 - x2))
-    
-    # Check if the angle is less than zero.
-    if angle < 0:
-
-        # Add 360 to the found angle.
-        angle += 360
-    
-    # Return the calculated angle.
-    return angle
-
-def calculateDistance(landmark1, landmark2):
-    x1, y1, _ = landmark1
-    x2, y2, _ = landmark2
-
-    # Calculate the Distance between the two points
-    dis = math.sqrt( ((x2 - x1)**2)+((y2 - y1))**2)
-
-    
-    # Return the calculated Distance.
-    return dis
-
-left_elbow_angle = 0;
-right_elbow_angle = 0;
-left_shoulder_angle = 0;
-right_shoulder_angle = 0;
-left_wrist_angle = 0;
-right_wrist_angle = 0;
-left_index_mcp_angle = 0;
-right_index_mcp_angle = 0;
-left_pinky_tip_angle = 0;
-right_pinky_tip_angle = 0;
-
-
-left_elbow_angle_previous = 0;
-right_elbow_angle_previous = 0;
-left_shoulder_angle_previous = 0;
-right_shoulder_angle_previous = 0;
-left_wrist_angle_previous = 0;
-right_wrist_angle_previous = 0;
-left_index_mcp_angle_previous = 0;
-right_index_mcp_angle_previous = 0;
-left_pinky_tip_angle_previous = 0;
-right_pinky_tip_angle_previous = 0;
-
-left_elbow_angle_diff = 0;
-right_elbow_angle_diff = 0;
-left_shoulder_angle_diff = 0;
-right_shoulder_angle_diff = 0;
-left_wrist_angle_diff = 0;
-right_wrist_angle_diff = 0;
-left_index_mcp_angle_diff = 0;
-right_index_mcp_angle_diff = 0;
-left_pinky_tip_angle_diff = 0;
-right_pinky_tip_angle_diff = 0;
-
-
-Angle_previous = []
-
-def updateAngle_previous():
-    # Angle_previous = []
-    left_elbow_angle_previous = left_elbow_angle;
-    right_elbow_angle_previous = right_elbow_angle;
-    left_shoulder_angle_previous = left_shoulder_angle;
-    right_shoulder_angle_previous = right_shoulder_angle;
-    left_wrist_angle_previous = left_wrist_angle;
-    right_wrist_angle_previous = right_wrist_angle;
-    left_index_mcp_angle_previous = left_index_mcp_angle;
-    right_index_mcp_angle_previous = right_index_mcp_angle;
-    left_pinky_tip_angle_previous = left_pinky_tip_angle;
-    right_pinky_tip_angle_previous = right_pinky_tip_angle;
-    Angle_previous.append([left_elbow_angle_previous, right_elbow_angle_previous, left_shoulder_angle_previous, right_shoulder_angle_previous, left_wrist_angle_previous, right_wrist_angle_previous,
-                           left_index_mcp_angle_previous, right_index_mcp_angle_previous, left_pinky_tip_angle_previous, right_pinky_tip_angle_previous])
-
-
-Angle_diff = []
-
-def updateAngle_diff():
-    # Angle_diff = []
-    left_elbow_angle_diff = left_elbow_angle - left_elbow_angle_previous;
-    right_elbow_angle_diff = right_elbow_angle - right_elbow_angle_previous;
-    left_shoulder_angle_diff = left_shoulder_angle - left_shoulder_angle_previous;
-    right_shoulder_angle_diff = right_shoulder_angle - right_shoulder_angle_previous;
-    left_wrist_angle_diff = left_wrist_angle - left_wrist_angle_previous;
-    right_wrist_angle_diff = right_wrist_angle - right_wrist_angle_previous;
-    left_index_mcp_angle_diff = left_index_mcp_angle - left_index_mcp_angle_previous;
-    right_index_mcp_angle_diff = right_index_mcp_angle - right_index_mcp_angle_previous;
-    left_pinky_tip_angle_diff = left_pinky_tip_angle_previous;
-    right_pinky_tip_angle_diff = right_pinky_tip_angle_previous;
-    Angle_diff.append([left_elbow_angle_diff, right_elbow_angle_diff, left_shoulder_angle_diff, right_shoulder_angle_diff, left_wrist_angle_diff, right_wrist_angle_diff,
-                       left_index_mcp_angle_diff, right_index_mcp_angle_diff, left_pinky_tip_angle_diff, right_pinky_tip_angle_diff])
-
-def classifyPose(landmarks, output_image, display=False):
-    global time_
-    global Angle_previous
-    global Angle_diff
-    
-    global left_elbow_angle
-    global right_elbow_angle
-    global left_shoulder_angle
-    global right_shoulder_angle
-    global left_wrist_angle
-    global right_wrist_angle
-    global left_index_mcp_angle
-    global right_index_mcp_angle
-    global left_pinky_tip_angle
-    global right_pinky_tip_angle
-    
-    global left_elbow_angle_previous
-    global right_elbow_angle_previous
-    global left_shoulder_angle_previous
-    global right_shoulder_angle_previous
-    global left_wrist_angle_previous
-    global right_wrist_angle_previous
-    global left_index_mcp_angle_previous
-    global right_index_mcp_angle_previous
-    global left_pinky_tip_angle_previous
-    global right_pinky_tip_angle_previous
-
-    
-    global left_elbow_angle_diff
-    global right_elbow_angle_diff
-    global left_shoulder_angle_diff
-    global right_shoulder_angle_diff
-    global left_wrist_angle_diff
-    global right_wrist_angle_diff
-    global left_index_mcp_angle_diff
-    global right_index_mcp_angle_diff
-    global left_pinky_tip_angle_diff
-    global right_pinky_tip_angle_diff
-
-    '''
-    This function classifies yoga poses depending upon the angles of various body joints.
-    Args:
-        landmarks: A list of detected landmarks of the person whose pose needs to be classified.
-        output_image: A image of the person with the detected pose landmarks drawn.
-        display: A boolean value that is if set to true the function displays the resultant image with the pose label 
-        written on it and returns nothing.
-    Returns:
-        output_image: The image with the detected pose landmarks drawn and pose label written.
-        label: The classified pose label of the person in the output_image.
-
-    '''
-    
-    # Initialize the label of the pose. It is not known at this stage.
-    label = 'Unknown Pose'
-
-    # Specify the color (Red) with which the label will be written on the image.
-    color = (0, 0, 255)
-    
-    # Calculate the required angles.
-    #----------------------------------------------------------------------------------------------------------------
-    
-    # Get the angle between the left shoulder, elbow and wrist points. 
-    right_elbow_angle = calculateAngle(landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value],
-                                      landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value],
-                                      landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value])
-    
-    # Get the angle between the right shoulder, elbow and wrist points. 
-    left_elbow_angle = calculateAngle(landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value],
-                                       landmarks[mp_pose.PoseLandmark.RIGHT_ELBOW.value],
-                                       landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value])   
-    
-    # Get the angle between the left elbow, shoulder and hip points. 
-    right_shoulder_angle = calculateAngle(landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value],
-                                         landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value],
-                                         landmarks[mp_pose.PoseLandmark.LEFT_HIP.value])
-
-    # Get the angle between the right hip, shoulder and elbow points. 
-    left_shoulder_angle = calculateAngle(landmarks[mp_pose.PoseLandmark.RIGHT_HIP.value],
-                                          landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value],
-                                          landmarks[mp_pose.PoseLandmark.RIGHT_ELBOW.value])
-
-    # Get the angle between the left hip, knee and ankle points. 
-    right_knee_angle = calculateAngle(landmarks[mp_pose.PoseLandmark.LEFT_HIP.value],
-                                     landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value],
-                                     landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value])
-
-    # Get the angle between the right hip, knee and ankle points 
-    left_knee_angle = calculateAngle(landmarks[mp_pose.PoseLandmark.RIGHT_HIP.value],
-                                      landmarks[mp_pose.PoseLandmark.RIGHT_KNEE.value],
-                                      landmarks[mp_pose.PoseLandmark.RIGHT_ANKLE.value])
-    
-    LEFT_HAND = 33
-    RIGHT_HAND = 33+21
-    
-    # Get the angle between the wrist, thumb_tip and pinky_tip
-    left_wrist_angle = calculateAngle(landmarks[mp_pose.HandLandmark.THUMB_TIP.value+LEFT_HAND],
-                                      landmarks[mp_pose.HandLandmark.WRIST.value+LEFT_HAND],
-                                      landmarks[mp_pose.HandLandmark.PINKY_TIP.value+LEFT_HAND])
-
-    right_wrist_angle = calculateAngle(landmarks[mp_pose.HandLandmark.THUMB_TIP.value+RIGHT_HAND],
-                                      landmarks[mp_pose.HandLandmark.WRIST.value+RIGHT_HAND],
-                                      landmarks[mp_pose.HandLandmark.PINKY_TIP.value+RIGHT_HAND])
-    
-
-    left_index_mcp_angle = calculateAngle(landmarks[mp_pose.HandLandmark.WRIST.value+LEFT_HAND],
-                                      landmarks[mp_pose.HandLandmark.INDEX_FINGER_MCP.value+LEFT_HAND],
-                                      landmarks[mp_pose.HandLandmark.INDEX_FINGER_TIP.value+LEFT_HAND])
-
-    right_index_mcp_angle = calculateAngle(landmarks[mp_pose.HandLandmark.WRIST.value+RIGHT_HAND],
-                                      landmarks[mp_pose.HandLandmark.INDEX_FINGER_MCP.value+RIGHT_HAND],
-                                      landmarks[mp_pose.HandLandmark.INDEX_FINGER_TIP.value+RIGHT_HAND])
-    
-    left_pinky_tip_angle = calculateAngle(landmarks[mp_pose.HandLandmark.WRIST.value+LEFT_HAND],
-                                      landmarks[mp_pose.HandLandmark.PINKY_MCP.value+LEFT_HAND],
-                                      landmarks[mp_pose.HandLandmark.PINKY_TIP.value+LEFT_HAND])
-
-    right_pinky_tip_angle = calculateAngle(landmarks[mp_pose.HandLandmark.WRIST.value+RIGHT_HAND],
-                                      landmarks[mp_pose.HandLandmark.PINKY_MCP.value+RIGHT_HAND],
-                                      landmarks[mp_pose.HandLandmark.PINKY_TIP.value+RIGHT_HAND])
-    
-    
-    # Distance Point
-    left_thumb_index_distance = calculateDistance(landmarks[mp_pose.HandLandmark.THUMB_TIP.value+LEFT_HAND],
-                                      landmarks[mp_pose.HandLandmark.INDEX_FINGER_TIP.value+LEFT_HAND])
-
-    right_thumb_index_distance = calculateDistance(landmarks[mp_pose.HandLandmark.THUMB_TIP.value+RIGHT_HAND],
-                                      landmarks[mp_pose.HandLandmark.INDEX_FINGER_TIP.value+RIGHT_HAND])
-    
-    left_thumb_pinky_distance = calculateDistance(landmarks[mp_pose.HandLandmark.THUMB_TIP.value+LEFT_HAND],
-                                      landmarks[mp_pose.HandLandmark.PINKY_TIP.value+LEFT_HAND])
-
-    right_thumb_pinky_distance = calculateDistance(landmarks[mp_pose.HandLandmark.THUMB_TIP.value+RIGHT_HAND],
-                                      landmarks[mp_pose.HandLandmark.PINKY_TIP.value+RIGHT_HAND])
-    
-
-    left_wrist_index_distance = calculateDistance(landmarks[mp_pose.HandLandmark.WRIST.value+LEFT_HAND],
-                                      landmarks[mp_pose.HandLandmark.INDEX_FINGER_TIP.value+LEFT_HAND])
-
-    right_wrist_index_distance = calculateDistance(landmarks[mp_pose.HandLandmark.WRIST.value+RIGHT_HAND],
-                                      landmarks[mp_pose.HandLandmark.INDEX_FINGER_TIP.value+RIGHT_HAND])
-    
-    left_wrist_pinky_distance = calculateDistance(landmarks[mp_pose.HandLandmark.WRIST.value+LEFT_HAND],
-                                      landmarks[mp_pose.HandLandmark.PINKY_TIP.value+LEFT_HAND])
-
-    right_wrist_pinky_distance = calculateDistance(landmarks[mp_pose.HandLandmark.WRIST.value+RIGHT_HAND],
-                                      landmarks[mp_pose.HandLandmark.PINKY_TIP.value+RIGHT_HAND])
-        
-    # Show Circlr Distance Point
-    cirlcr1_posx ,cirlcr1_posy,_= landmarks[mp_pose.HandLandmark.THUMB_TIP.value+LEFT_HAND]
-    cirlcr2_posx ,cirlcr2_posy,_= landmarks[mp_pose.HandLandmark.INDEX_FINGER_TIP.value+LEFT_HAND]
-    # circle_center = (int((cirlcr1_posx+cirlcr2_posx)*0.5),int((cirlcr1_posy+cirlcr2_posy)*0.5))
-    # cv2.circle(output_image,circle_center,int(left_thumb_index_distance/2.5),(0,0,0),-1)
-    
-    cirlcr1_posx ,cirlcr1_posy,_= landmarks[mp_pose.HandLandmark.THUMB_TIP.value+RIGHT_HAND]
-    cirlcr2_posx ,cirlcr2_posy,_= landmarks[mp_pose.HandLandmark.INDEX_FINGER_TIP.value+RIGHT_HAND]
-    # circle_center = (int((cirlcr1_posx+cirlcr2_posx)*0.5),int((cirlcr1_posy+cirlcr2_posy)*0.5))
-    # cv2.circle(output_image,circle_center,int(right_thumb_index_distance/2.5),(0,0,0),-1)
-
-    # Draw Data
-    # cv2.rectangle(output_image,(0,0),(380,480),(0,0,0),-1)
-    text_posx = 20
-    text_step = 40
-    cv2.putText(output_image, "L_elbow_angle : " + str("{:0.2f}".format(left_elbow_angle)), (10, text_posx),cv2.FONT_HERSHEY_PLAIN, 1.3, (255,255,255), 2)
-    cv2.putText(output_image, "R_elbow_angle : " + str("{:0.2f}".format(right_elbow_angle)), (10, text_posx+text_step*1),cv2.FONT_HERSHEY_PLAIN, 1.3, (255,255,255), 2)
-    cv2.putText(output_image, "L_shoulder_angle : " + str("{:0.2f}".format(left_shoulder_angle)), (10, text_posx+text_step*2),cv2.FONT_HERSHEY_PLAIN, 1.3, (255,255,255), 2)
-    cv2.putText(output_image, "R_shoulder_angle : " + str("{:0.2f}".format(right_shoulder_angle)), (10, text_posx+text_step*3),cv2.FONT_HERSHEY_PLAIN, 1.3, (255,255,255), 2)
-    cv2.putText(output_image, "L_wrist_angle : " + str("{:0.2f}".format(left_wrist_angle)), (10, text_posx+text_step*4),cv2.FONT_HERSHEY_PLAIN, 1.3, (255,255,255), 2)
-    cv2.putText(output_image, "R_wrist_angle : " + str("{:0.2f}".format(right_wrist_angle)), (10, text_posx+text_step*5),cv2.FONT_HERSHEY_PLAIN, 1.3, (255,255,255), 2)
-    cv2.putText(output_image, "L_index_finger_angle : " + str("{:0.2f}".format(left_index_mcp_angle)), (10, text_posx+text_step*6),cv2.FONT_HERSHEY_PLAIN, 1.3, (255,255,255), 2)
-    cv2.putText(output_image, "R_index_finger_angle : " + str("{:0.2f}".format(right_index_mcp_angle)), (10, text_posx+text_step*7),cv2.FONT_HERSHEY_PLAIN, 1.3, (255,255,255), 2)
-    cv2.putText(output_image, "L_pinky_finger_angle : " + str("{:0.2f}".format(left_pinky_tip_angle)), (10, text_posx+text_step*8),cv2.FONT_HERSHEY_PLAIN, 1.3, (255,255,255), 2)
-    cv2.putText(output_image, "R_pinky_finger_angle : " + str("{:0.2f}".format(right_pinky_tip_angle)), (10, text_posx+text_step*9),cv2.FONT_HERSHEY_PLAIN, 1.3, (255,255,255), 2)
-    
-
-    cv2.putText(output_image, "L_thumb_index_distance : " + str("{:0.2f}".format(left_thumb_index_distance)), (10*50, text_posx),cv2.FONT_HERSHEY_PLAIN, 1.3, (255,0,0), 2)
-    cv2.putText(output_image, "R_thumb_index_distance : " + str("{:0.2f}".format(right_thumb_index_distance)), (10*50, text_posx+text_step*1),cv2.FONT_HERSHEY_PLAIN, 1.3, (255,0,0), 2)
-    cv2.putText(output_image, "L_thumb_pinky_distance : " + str("{:0.2f}".format(left_thumb_pinky_distance)), (10*50, text_posx+text_step*2),cv2.FONT_HERSHEY_PLAIN, 1.3, (255,0,0), 2)
-    cv2.putText(output_image, "R_thumb_pinky_distance : " + str("{:0.2f}".format(right_thumb_pinky_distance)), (10*50, text_posx+text_step*3),cv2.FONT_HERSHEY_PLAIN, 1.3, (255,0,0), 2)
-    cv2.putText(output_image, "L_wrist_index_distance : " + str("{:0.2f}".format(left_wrist_index_distance)), (10*50, text_posx+text_step*4),cv2.FONT_HERSHEY_PLAIN, 1.3, (255,0,0), 2)
-    cv2.putText(output_image, "R_wrist_index_distance : " + str("{:0.2f}".format(right_wrist_index_distance)), (10*50, text_posx+text_step*5),cv2.FONT_HERSHEY_PLAIN, 1.3, (255,0,0), 2)
-    cv2.putText(output_image, "L_wrist_pinky_distance : " + str("{:0.2f}".format(left_wrist_pinky_distance)), (10*50, text_posx+text_step*6),cv2.FONT_HERSHEY_PLAIN, 1.3, (255,0,0), 2)
-    cv2.putText(output_image, "R_wrist_pinky_distance : " + str("{:0.2f}".format(right_wrist_pinky_distance)), (10*50, text_posx+text_step*7),cv2.FONT_HERSHEY_PLAIN, 1.3, (255,0,0), 2)
-    
-    #----------------------------------------------------------------------------------------------------------------
-    
-    # Update Diff Angle
-    if(time.time() - time_ > 0.2):
-        
-        left_elbow_angle_diff = abs(left_elbow_angle - left_elbow_angle_previous);
-        right_elbow_angle_diff = abs(right_elbow_angle - right_elbow_angle_previous);
-        left_shoulder_angle_diff = abs(left_shoulder_angle - left_shoulder_angle_previous);
-        right_shoulder_angle_diff = abs(right_shoulder_angle - right_shoulder_angle_previous);
-        left_wrist_angle_diff = abs(left_wrist_angle - left_wrist_angle_previous);
-        right_wrist_angle_diff = abs(right_wrist_angle - right_wrist_angle_previous);
-        left_index_mcp_angle_diff = abs(left_index_mcp_angle - left_index_mcp_angle_previous);
-        right_index_mcp_angle_diff = abs(right_index_mcp_angle - right_index_mcp_angle_previous);
-        left_index_mcp_angle_diff = abs(left_index_mcp_angle - left_index_mcp_angle_previous);
-        right_index_mcp_angle_diff = abs(right_index_mcp_angle - right_index_mcp_angle_previous);
-        left_pinky_tip_angle_diff = abs(left_pinky_tip_angle - left_pinky_tip_angle_previous);
-        right_pinky_tip_angle_diff = abs(right_pinky_tip_angle - right_pinky_tip_angle_previous);
-
-        Angle_diff.append([left_elbow_angle_diff, right_elbow_angle_diff, left_shoulder_angle_diff, right_shoulder_angle_diff, left_wrist_angle_diff, right_wrist_angle_diff, 
-                           left_index_mcp_angle_diff, right_index_mcp_angle_diff, left_pinky_tip_angle_diff, right_pinky_tip_angle_diff])
-        
-        ic(Angle_diff)
-               
-        left_elbow_angle_previous = left_elbow_angle;
-        right_elbow_angle_previous = right_elbow_angle;
-        left_shoulder_angle_previous = left_shoulder_angle;
-        right_shoulder_angle_previous = right_shoulder_angle;
-        left_wrist_angle_previous = left_wrist_angle;
-        right_wrist_angle_previous = right_wrist_angle;
-        left_index_mcp_angle_previous = left_index_mcp_angle;
-        right_index_mcp_angle_previous = right_index_mcp_angle;
-        left_pinky_tip_angle_previous = left_pinky_tip_angle;
-        right_pinky_tip_angle_previous = right_pinky_tip_angle;
-
-        
-        Angle_previous = []
-        Angle_diff = []
-        time_ = time.time()
-    
-    
-    # Check if it is the warrior II pose or the T pose.
-    # As for both of them, both arms should be straight and shoulders should be at the specific angle.
-    #----------------------------------------------------------------------------------------------------------------
-    
-    # Check if the both arms are straight.
-    if left_elbow_angle > 165 and left_elbow_angle < 195 and right_elbow_angle > 165 and right_elbow_angle < 195:
-
-        # Check if shoulders are at the required angle.
-        if left_shoulder_angle > 80 and left_shoulder_angle < 110 and right_shoulder_angle > 80 and right_shoulder_angle < 110:
-
-    # Check if it is the warrior II pose.
-    #----------------------------------------------------------------------------------------------------------------
-
-            # Check if one leg is straight.
-            if left_knee_angle > 165 and left_knee_angle < 195 or right_knee_angle > 165 and right_knee_angle < 195:
-
-                # Check if the other leg is bended at the required angle.
-                if left_knee_angle > 90 and left_knee_angle < 120 or right_knee_angle > 90 and right_knee_angle < 120:
-
-                    # Specify the label of the pose that is Warrior II pose.
-                    label = 'Warrior II Pose' 
-                        
-    #----------------------------------------------------------------------------------------------------------------
-    
-    # Check if it is the T pose.
-    #----------------------------------------------------------------------------------------------------------------
-    
-            # Check if both legs are straight
-            if left_knee_angle > 160 and left_knee_angle < 195 and right_knee_angle > 160 and right_knee_angle < 195:
-
-                # Specify the label of the pose that is tree pose.
-                label = 'T Pose'
-
-    #----------------------------------------------------------------------------------------------------------------
-    
-    # Check if it is the tree pose.
-    #----------------------------------------------------------------------------------------------------------------
-    
-    # Check if one leg is straight
-    if left_knee_angle > 165 and left_knee_angle < 195 or right_knee_angle > 165 and right_knee_angle < 195:
-
-        # Check if the other leg is bended at the required angle.
-        if left_knee_angle > 315 and left_knee_angle < 335 or right_knee_angle > 25 and right_knee_angle < 45:
-
-            # Specify the label of the pose that is tree pose.
-            label = 'Tree Pose'
+                if (is_left_leg_straight_for_warrior and is_right_leg_bent_for_warrior) or \
+                   (is_right_leg_straight_for_warrior and is_left_leg_bent_for_warrior):
+                    label = 'Warrior II Pose'
                 
-    #------===========================================================================================
-    
-    
-    if(left_wrist_angle != 0 or right_wrist_angle != 0):
-        if right_elbow_angle > 25 and right_elbow_angle < 110:
-            if right_elbow_angle_diff > 10:
-                print("bye right")
-                a= 0
-        if left_elbow_angle > 260 and left_elbow_angle < 340:
-            if left_elbow_angle_diff > 10:
-                print("bye left")
-                a= 0
-    
+                # Check for T-Pose: both legs straight
+                elif (self.TPOSE_STRAIGHT_LEG_MIN < self.left_knee_angle < self.TPOSE_STRAIGHT_LEG_MAX and
+                      self.TPOSE_STRAIGHT_LEG_MIN < self.right_knee_angle < self.TPOSE_STRAIGHT_LEG_MAX):
+                    label = 'T Pose'
+        return label
 
-    #------===========================================================================================
-    
-    # Check if the pose is classified successfully
-    if label != 'Unknown Pose':
+    def _check_tree_pose(self):
+        """
+        Checks for Tree Pose.
+        Returns:
+            str: The pose label ('Tree Pose') or UNKNOWN_POSE_LABEL.
+        """
+        label = self.UNKNOWN_POSE_LABEL
+        # Check if one leg is straight
+        is_left_leg_straight = self.TREE_POSE_STRAIGHT_LEG_MIN < self.left_knee_angle < self.TREE_POSE_STRAIGHT_LEG_MAX
+        is_right_leg_straight = self.TREE_POSE_STRAIGHT_LEG_MIN < self.right_knee_angle < self.TREE_POSE_STRAIGHT_LEG_MAX
+
+        if is_left_leg_straight or is_right_leg_straight:
+            # Check if the other leg is bent appropriately for Tree Pose
+            # (foot at the inner thigh of the straight leg)
+            is_right_leg_bent_for_tree = self.TREE_POSE_BENT_LEG_MIN_RIGHT_LEG_UP < self.right_knee_angle < self.TREE_POSE_BENT_LEG_MAX_RIGHT_LEG_UP
+            is_left_leg_bent_for_tree = self.TREE_POSE_BENT_LEG_MIN_LEFT_LEG_UP < self.left_knee_angle < self.TREE_POSE_BENT_LEG_MAX_LEFT_LEG_UP
+            
+            if (is_left_leg_straight and is_right_leg_bent_for_tree) or \
+               (is_right_leg_straight and is_left_leg_bent_for_tree):
+                label = 'Tree Pose'
+        return label
+
+    def _check_bye_gesture(self):
+        """
+        Checks for a "bye" gesture based on elbow movement.
+        This method currently prints debug messages but does not set a pose label.
+        """
+        # Check if hands are detected (wrist angles would be non-zero)
+        if self.left_wrist_angle != 0 or self.right_wrist_angle != 0:
+            # Check for right arm "bye"
+            if (self.BYE_GESTURE_RIGHT_ELBOW_MIN < self.right_elbow_angle < self.BYE_GESTURE_RIGHT_ELBOW_MAX and
+                self.right_elbow_angle_diff > self.BYE_GESTURE_ELBOW_DIFF_THRESHOLD):
+                print("Debug: Potential 'bye right' gesture detected based on elbow movement.")
+            
+            # Check for left arm "bye"
+            if (self.BYE_GESTURE_LEFT_ELBOW_MIN < self.left_elbow_angle < self.BYE_GESTURE_LEFT_ELBOW_MAX and
+                self.left_elbow_angle_diff > self.BYE_GESTURE_ELBOW_DIFF_THRESHOLD):
+                print("Debug: Potential 'bye left' gesture detected based on elbow movement.")
+
+    def _draw_angle_and_distance_data(self, output_image, 
+                                     left_thumb_index_dist, right_thumb_index_dist,
+                                     left_thumb_pinky_dist, right_thumb_pinky_dist,
+                                     left_wrist_index_dist, right_wrist_index_dist,
+                                     left_wrist_pinky_dist, right_wrist_pinky_dist):
+        """Draws angle and distance data onto the output image using class constants."""
         
-        # Update the color (to green) with which the label will be written on the image.
-        color = (0, 255, 0)  
-    
-    # Write the label on the output image. 
-    
-    # cv2.putText(output_image, label, (10, 30),cv2.FONT_HERSHEY_PLAIN, 2, color, 2)
-    
-    # Update Varible
-    
-    
-    # Check if the resultant image is specified to be displayed.
-    if display:
-    
-        # Display the resultant image.
-        plt.figure(figsize=[10,10])
-        plt.title("Output Image");plt.axis('off');plt.imshow(output_image[:,:,::-1]);plt.show()
+        # Draw Body Angles
+        angle_texts = [
+            f"L_elbow_angle : {self.left_elbow_angle:.2f}",
+            f"R_elbow_angle : {self.right_elbow_angle:.2f}",
+            f"L_shoulder_angle : {self.left_shoulder_angle:.2f}",
+            f"R_shoulder_angle : {self.right_shoulder_angle:.2f}",
+            f"L_wrist_angle : {self.left_wrist_angle:.2f}",
+            f"R_wrist_angle : {self.right_wrist_angle:.2f}",
+            f"L_index_finger_angle : {self.left_index_mcp_angle:.2f}",
+            f"R_index_finger_angle : {self.right_index_mcp_angle:.2f}", # Person's Right Hand
+            f"L_pinky_finger_angle : {self.left_pinky_tip_angle:.2f}",   # Person's Left Hand
+            f"R_pinky_finger_angle : {self.right_pinky_tip_angle:.2f}"  # Person's Right Hand
+        ]
+        for i, text in enumerate(angle_texts):
+            cv2.putText(output_image, text, 
+                        (self.TEXT_POS_X_ANGLES, self.TEXT_POS_Y_ANGLES_START + i * self.TEXT_STEP_Y_ANGLES),
+                        self.FONT, self.FONT_SCALE_ANGLES, self.COLOR_WHITE, self.FONT_THICKNESS)
         
-    else:
-        
-        # Return the output image and the classified label.
-        return output_image, label
+        # Draw Hand Distances
+        distance_texts = [
+            f"L_thumb_index_distance : {left_thumb_index_dist:.2f}",
+            f"R_thumb_index_distance : {right_thumb_index_dist:.2f}",
+            f"L_thumb_pinky_distance : {left_thumb_pinky_dist:.2f}",
+            f"R_thumb_pinky_distance : {right_thumb_pinky_dist:.2f}",
+            f"L_wrist_index_distance : {left_wrist_index_dist:.2f}",
+            f"R_wrist_index_distance : {right_wrist_index_dist:.2f}",
+            f"L_wrist_pinky_distance : {left_wrist_pinky_dist:.2f}",
+            f"R_wrist_pinky_distance : {right_wrist_pinky_dist:.2f}"
+        ]
+        for i, text in enumerate(distance_texts):
+            cv2.putText(output_image, text, 
+                        (self.TEXT_POS_X_DISTANCES, self.TEXT_POS_Y_DISTANCES_START + i * self.TEXT_STEP_Y_DISTANCES),
+                        self.FONT, self.FONT_SCALE_DISTANCES, self.COLOR_BLUE_TEXT, self.FONT_THICKNESS)
